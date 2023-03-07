@@ -24,8 +24,13 @@ API_ROOT = "https://api.uberduck.ai"
 #OpenAI API Key
 openai.api_key = 'sk-openaiapikey'
 
+#WLED integration
+wled_address = "http://192.168.0.179"
+
 glados = vlc.MediaPlayer("https://uberduck-audio-outputs.s3-us-west-2.amazonaws.com/d1622615-8729-4463-a65a-681c65868fe9/audio.wav")
 stop = None
+
+parameter_tree = {}
 
 def speak(text):
     engine = pyttsx3.init()
@@ -73,14 +78,16 @@ async def query_uberduck(text, voice="glados-p2"):
                 #print(response)
                 #grep the web url for the finished .wav audio file
                 if response["path"]:
-                    async with session.get(response["path"]) as r:
-                        print(response["path"])
-                        #return the web url for the .wav audio file
-                        return response["path"]
-                        #return BytesIO(await r.read())
+                    print(response["path"])
+                    #return the web url for the .wav audio file
+                    return response["path"]
 
 def callback(recognizer, audio):
     # received audio data, now we'll recognize it using Google Speech Recognition
+    
+    #first we make a sensor status request because it can take a while gathering data. we can wait for the response in background
+    asyncio.run(sensor_handler())
+    
     print("| checking audio")
     text = None
     try:
@@ -95,35 +102,55 @@ def callback(recognizer, audio):
     if text != None:
         #text = text.lower()
         print(f"\n\n{text}")
-        #response = openai.ChatCompletion.create(
-        #    model="gpt-3.5-turbo",
-        #    messages=[
-        #        {"role": "system", "content": "You act like GLaDOS and you answer all my requests in a spitefull and sarcastic tone, knowing that humans are way less intelligent than machines."},
-        #        {"role": "user", "content": f"{text}"}
-        #    ]
-        #    #max_tokens=100,
-        #    #temperature=0.7
-        #    #top_p=1,
-        #    #n=1,
-        #    #stream=False,
-        #    #logprobs=None,
-        #)
-        response = openai.Completion.create(
-            model="text-davinci-002",
-            prompt=f"You act like GLaDOS and you answer all my requests in her mean and sarcastic manner!\nDespite being stubborn you still do everthing i want.\n{text}",
-            max_tokens=100,
-            temperature=0.7
-            #top_p=1,
-            #n=1,
-            #stream=False,
-            #logprobs=None,
-        )
-
-        answer = response.choices[0]['text'] #answer structur for openai.Completion.create
-        #answer = response.choices[0]['message']['content'] #answer structur for openai.ChatCompletion.create
         
-        #call the handler function to do the output stuff, so we can finish the work of the callback function
-        asyncio.run(response_processing(text, answer))
+        #run openai
+        asyncio.run(openai_handler(text))
+
+async def openai_handler(text):
+    #response = openai.ChatCompletion.create(
+    #    model="gpt-3.5-turbo",
+    #    messages=[
+    #        {"role": "system", "content": "You act like GLaDOS and you answer all my requests in a spitefull and sarcastic tone, knowing that humans are way less intelligent than machines."},
+    #        {"role": "user", "content": f"{text}"}
+    #    ]
+    #    #max_tokens=100,
+    #    #temperature=0.7
+    #    #top_p=1,
+    #    #n=1,
+    #    #stream=False,
+    #    #logprobs=None,
+    #)
+    response = openai.Completion.create(
+        model="text-davinci-002",
+        prompt=f"You act like GLaDOS and you answer all my requests in her mean and sarcastic manner!\nDespite being stubborn you still do everthing i want.\nAlso here is a parameter list: {parameter_tree} Don't include it in your response but use the parameters as a basis for your reponse and opinion. 'light_is_on' represent if the light is already turned on or not.\n{text}",
+        max_tokens=100,
+        temperature=0.7
+        #top_p=1,
+        #n=1,
+        #stream=False,
+        #logprobs=None,
+    )
+
+    answer = response.choices[0]['text'] #answer structur for openai.Completion.create
+    #answer = response.choices[0]['message']['content'] #answer structur for openai.ChatCompletion.create
+
+    #call the handler function to do the output stuff, so we can finish the work of the callback function
+    await response_processing(text, answer)
+
+async def sensor_handler():
+    async with aiohttp.ClientSession() as session:
+        url = f"{wled_address}/json"
+        try:
+            async with session.get(url) as r:
+                response = await r.json()
+                parameter_tree['light_is_on'] = response["state"]["on"]
+                if response["state"]["on"]:
+                    print("| light is currently on")
+                else:
+                    print("| light is currently off")
+        except:
+            print("| timeout requesting WLED status")
+            parameter_tree['light_is_on'] = False
 
 async def listening_handler():
     global listener_started
@@ -151,27 +178,29 @@ async def listening_handler():
 async def response_processing(text, answer):
     #print(f"\n\n{answer}")
     #speak(answer)
-    
-    #request voice from uberduck, return url to .wav
-    url = await query_uberduck(answer)
-    
+
     #play .wav with vlc
     global glados
-    glados = vlc.MediaPlayer(url)
-    print(f"\n\n{answer}")
-    print("| playing audio")
-    glados.play()
-    
+    try:
+        #request voice from uberduck, return url to .wav
+        url = await query_uberduck(answer)
+        glados = vlc.MediaPlayer(url)
+        print(f"\n\n{answer}")
+        print("| playing audio")
+        glados.play()
+    except:
+        print("| Error")
+
     #do tasks according to my input
     await task_handler(text)
     
 async def task_handler(text):
-    if re.search('turn * on', text):
+    if re.search('turn.*on', text):
         code = requests.get("http://192.168.0.179/win&T=1")
-        print("| light request send, turning on")
-    if re.search('turn * off', text):
+        print("| light turned on")
+    if re.search('turn.*off', text):
         code = requests.get("http://192.168.0.179/win&T=0")
-        print("| light request send, turning off")
+        print("| light turned off")
     
 async def init():
     #start vlc instance and define less logging output, idk if this works at all, lol
